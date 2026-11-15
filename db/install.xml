@@ -53,6 +53,7 @@
       <FIELDS>
         <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
         <FIELD NAME="txnid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Transaction this notification resolved to, when it could be matched."/>
+        <FIELD NAME="enrolid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Enrolment instance used to validate and process the notification, including deferred mode."/>
         <FIELD NAME="notificationid" TYPE="char" LENGTH="64" NOTNULL="false" SEQUENCE="false" COMMENT="Top level id of the notification body."/>
         <FIELD NAME="requestid" TYPE="char" LENGTH="128" NOTNULL="false" SEQUENCE="false" COMMENT="x-request-id header."/>
         <FIELD NAME="type" TYPE="char" LENGTH="64" NOTNULL="false" SEQUENCE="false" COMMENT="Notification type, e.g. payment."/>
