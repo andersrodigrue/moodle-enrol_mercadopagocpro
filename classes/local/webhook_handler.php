@@ -121,7 +121,9 @@ class webhook_handler
         $signaturestatus = $this->verify_signature($headers, $notification, $credentials);
         $this->update_log($logid, ['signaturestatus' => $signaturestatus]);
 
-        if ($signaturestatus === self::SIG_INVALID || $signaturestatus === self::SIG_MISSING) {
+        // Fail closed whenever verification is required, including when validation
+        // was skipped because the webhook secret or SDK is unavailable.
+        if ($signaturestatus !== self::SIG_VALID) {
             if ($this->signature_required()) {
                 webhook_rejected::create_from_notification($notification, $signaturestatus)->trigger();
                 $this->finish_log($logid, 401, false, 'Signature ' . $signaturestatus);

@@ -290,6 +290,30 @@ final class payment_processor_test extends \advanced_testcase
     }
 
     /**
+     * An approved payment even one cent below the price must not grant access.
+     *
+     * @return void
+     */
+    public function test_one_cent_underpayment_is_withheld(): void {
+        $this->prepare();
+        $this->queue_payment(['status' => 'approved', 'transaction_amount' => 99.99]);
+        (new payment_processor())->process_payment('1122334455', $this->txn);
+        $this->assertFalse(is_enrolled(\context_course::instance($this->course->id), $this->user));
+    }
+
+    /**
+     * Missing currency is not equivalent to the currency in the order.
+     *
+     * @return void
+     */
+    public function test_empty_currency_is_withheld(): void {
+        $this->prepare();
+        $this->queue_payment(['status' => 'approved', 'currency_id' => '']);
+        (new payment_processor())->process_payment('1122334455', $this->txn);
+        $this->assertFalse(is_enrolled(\context_course::instance($this->course->id), $this->user));
+    }
+
+    /**
      * An approved payment in the wrong currency never grants access.
      *
      * @return void

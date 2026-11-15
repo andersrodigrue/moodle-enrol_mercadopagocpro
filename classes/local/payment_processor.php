@@ -384,12 +384,16 @@ class payment_processor
      * @return bool
      */
     protected function amount_matches(float $paidamount, string $paidcurrency, \stdClass $transaction): bool {
-        $expected = (float)$transaction->amount;
-        if ($paidcurrency !== '' && strtoupper($paidcurrency) !== strtoupper((string)$transaction->currency)) {
+        if ($paidcurrency === '' || strtoupper($paidcurrency) !== strtoupper((string)$transaction->currency)) {
             return false;
         }
-        // A tolerance of one cent absorbs rounding on the Mercado Pago side.
-        return ($paidamount + 0.01) >= $expected;
+
+        // Convert both values to minor units before comparing. Do not grant
+        // enrolment for payments even one cent below the agreed course price.
+        // Supported checkout currencies in this integration use two decimals.
+        $paidcents = (int)round($paidamount * 100, 0, PHP_ROUND_HALF_UP);
+        $expectedcents = (int)round(((float)$transaction->amount) * 100, 0, PHP_ROUND_HALF_UP);
+        return $paidcents >= $expectedcents;
     }
 
     /**

@@ -183,6 +183,31 @@ final class webhook_handler_test extends \advanced_testcase
     }
 
     /**
+     * Failure to validate a signature must fail closed when enforcement is on.
+     *
+     * @return void
+     */
+    public function test_skipped_signature_is_rejected_when_required(): void {
+        $this->prepare();
+        set_config('requiresignature', 1, 'enrol_mercadopagocpro');
+
+        $handler = new class extends webhook_handler {
+            protected function verify_signature(array $headers, array &$notification,
+                    \enrol_mercadopagocpro\local\credentials $credentials): string {
+                return self::SIG_SKIPPED;
+            }
+        };
+        $response = $handler->handle(
+            ['data.id' => '1122334455', 'type' => 'payment', 'enrolid' => $this->instance->id],
+            [],
+            '{"type":"payment"}',
+            '10.0.0.1'
+        );
+
+        $this->assertSame(401, $response['status']);
+    }
+
+    /**
      * Every notification, accepted or not, leaves an audit row behind.
      *
      * @return void
