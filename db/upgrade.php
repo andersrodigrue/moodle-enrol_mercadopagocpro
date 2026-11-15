@@ -36,10 +36,15 @@ function xmldb_enrol_mercadopagocpro_upgrade($oldversion) {
     global $DB;
 
     $dbman = $DB->get_manager();
-    unset($dbman); // Placeholder: kept so future steps have the manager at hand.
 
-    // Automatically generated Moodle v5.2.0 release upgrade line.
-    // Put any upgrade step following this.
+    if ($oldversion < 2026091801) {
+        $table = new xmldb_table('enrol_mercadopagocpro_wh');
+        $field = new xmldb_field('enrolid', XMLDB_TYPE_INTEGER, '10', null, null, null, null, 'txnid');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+        upgrade_plugin_savepoint(true, 2026091801, 'enrol', 'mercadopagocpro');
+    }
 
     return true;
 }
