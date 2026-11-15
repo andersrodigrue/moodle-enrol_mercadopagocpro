@@ -140,6 +140,12 @@ class webhook_handler
 
         webhook_received::create_from_notification($notification)->trigger();
 
+        // Remember the enrolment instance for deferred processing. A new payment
+        // does not have a local paymentid yet, so there may be no txnid at this point.
+        if ($instance !== null) {
+            $this->update_log($logid, ['enrolid' => (int)$instance->id]);
+        }
+
         // Link the audit row to the transaction as soon as one can be identified,
         // so the log is useful even when processing is deferred or fails.
         $transaction = $this->find_transaction($notification, $instance);
@@ -160,6 +166,13 @@ class webhook_handler
         }
 
         $result = $this->dispatch($notification, $instance, $transaction);
+        // The transaction becomes identifiable only after querying the API.
+        if ($transaction === null) {
+            $resolved = $this->find_transaction($notification, $instance);
+            if ($resolved !== null) {
+                $this->update_log($logid, ['txnid' => (int)$resolved->id]);
+            }
+        }
 
         if ($result->should_retry()) {
             // Accept the notification and retry internally, so Mercado Pago is not
@@ -198,10 +211,10 @@ class webhook_handler
 
         try {
             if ($type === 'payment') {
-                return $processor->process_payment($dataid, $transaction);
+                return $processor->process_payment($dataid, $transaction, $instance);
             }
             if ($type === 'merchant_order' || $type === 'topic_merchant_order_wh') {
-                return $processor->process_merchant_order($dataid, $transaction);
+                return $processor->process_merchant_order($dataid, $transaction, $instance);
             }
         } catch (\Throwable $e) {
             util::log_error(
@@ -218,40 +231,24 @@ class webhook_handler
     }
 
     /**
-     * Best effort resolution of the transaction a notification refers to.
+     * Find only transactions already bound to a payment id.
+     *
+     * Never guess which pending buyer paid based on the newest transaction: the
+     * authoritative external_reference must be fetched from Mercado Pago first.
      *
      * @param  array          $notification
      * @param  \stdClass|null $instance
      * @return \stdClass|null
      */
     protected function find_transaction(array $notification, ?\stdClass $instance): ?\stdClass {
-        global $DB;
-
-        if ($notification['type'] === 'payment' && $notification['dataid'] !== '') {
-            $existing = transaction::get_by_payment_id($notification['dataid']);
-            if ($existing !== null) {
-                return $existing;
-            }
+        if ($notification['type'] !== 'payment' || $notification['dataid'] === '') {
+            return null;
         }
 
-        if ($instance !== null) {
-            // Newest transaction of this instance that is still waiting for a payment.
-            [$insql, $params] = $DB->get_in_or_equal(status::transitional(), SQL_PARAMS_NAMED, 'st');
-            $params['enrolid'] = $instance->id;
-            $records = $DB->get_records_select(
-                transaction::TABLE,
-                "enrolid = :enrolid AND status $insql AND paymentid IS NULL",
-                $params,
-                'id DESC',
-                '*',
-                0,
-                1
-            );
-            if ($records) {
-                return reset($records);
-            }
+        $existing = transaction::get_by_payment_id($notification['dataid']);
+        if ($existing !== null && ($instance === null || (int)$existing->enrolid === (int)$instance->id)) {
+            return $existing;
         }
-
         return null;
     }
 
@@ -535,7 +532,38 @@ class webhook_handler
         ];
 
         $transaction = !empty($logrow->txnid) ? transaction::get((int)$logrow->txnid) : null;
-        $result = $this->dispatch($notification, null, $transaction);
+        // The persisted enrolid survives deferred mode, when txnid is still null.
+        // Older log rows may lack this field and retain their original txnid path.
+        $instance = null;
+        if (!empty($logrow->enrolid)) {
+            global $DB;
+            $instance = $DB->get_record('enrol', [
+                'id' => (int)$logrow->enrolid,
+                'enrol' => 'mercadopagocpro',
+            ]) ?: null;
+            if ($instance === null) {
+                $result = processing_result::ignored('Enrolment instance no longer exists.');
+                $this->update_log((int)$logrow->id, [
+                    'processed' => 1,
+                    'nextretry' => null,
+                    'errormessage' => $result->message,
+                    'timeprocessed' => time(),
+                ]);
+                return $result;
+            }
+        }
+        if ($transaction !== null && $instance !== null &&
+                (int)$transaction->enrolid !== (int)$instance->id) {
+            // Never reuse an unrelated transaction from an old audit record.
+            $transaction = null;
+        }
+        $result = $this->dispatch($notification, $instance, $transaction);
+        if ($transaction === null) {
+            $resolved = $this->find_transaction($notification, $instance);
+            if ($resolved !== null) {
+                $this->update_log((int)$logrow->id, ['txnid' => (int)$resolved->id]);
+            }
+        }
 
         if ($result->should_retry()) {
             $this->schedule_retry((int)$logrow->id, (int)$logrow->attempts);
