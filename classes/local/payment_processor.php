@@ -55,10 +55,12 @@ class payment_processor
      * Process a payment id against the transaction it belongs to.
      *
      * @param  string|int     $paymentid       Mercado Pago payment id
-     * @param  \stdClass|null $hinttransaction transaction the caller believes this payment belongs to
+     * @param  \stdClass|null $hinttransaction transaction already known to hold this payment id
+     * @param  \stdClass|null $instancehint verified instance from the webhook endpoint
      * @return processing_result
      */
-    public function process_payment($paymentid, ?\stdClass $hinttransaction = null): processing_result {
+    public function process_payment($paymentid, ?\stdClass $hinttransaction = null,
+            ?\stdClass $instancehint = null): processing_result {
         global $DB;
 
         $paymentid = (string)$paymentid;
@@ -66,31 +68,45 @@ class payment_processor
             return processing_result::ignored('Payment id is not a positive integer.');
         }
 
-        // Find the transaction to work with: either the caller's hint or, failing
-        // that, one already carrying this payment id.
+        // Only an existing payment-id binding may be used as a local hint. A new
+        // payment must be looked up in the API using the signed webhook's enrolment
+        // instance, then mapped by the returned external_reference.
         $transaction = $hinttransaction ?? transaction::get_by_payment_id($paymentid);
-
-        // Without a transaction there is nothing to resolve credentials with, so the
-        // payment cannot be fetched. This is normal for notifications produced by
-        // other integrations sharing the same Mercado Pago account.
-        if ($transaction === null) {
-            return processing_result::ignored('No local transaction matches this payment.');
+        if ($transaction === null && $instancehint === null) {
+            return processing_result::ignored('No instance to resolve an unbound payment.');
         }
 
-        $instance = $DB->get_record('enrol', ['id' => $transaction->enrolid, 'enrol' => 'mercadopagocpro']);
+        if ($transaction !== null && $instancehint !== null &&
+                (int)$transaction->enrolid !== (int)$instancehint->id) {
+            return processing_result::ignored('Payment belongs to a different enrolment instance.');
+        }
+
+        $enrolid = $transaction !== null ? (int)$transaction->enrolid : (int)$instancehint->id;
+        $instance = $DB->get_record('enrol', ['id' => $enrolid, 'enrol' => 'mercadopagocpro']);
         if (!$instance) {
             return processing_result::ignored('The enrolment instance no longer exists.');
         }
 
         $client = $this->get_client($instance);
-
         try {
             $payment = $client->get_payment($paymentid);
         } catch (api_exception $e) {
-            transaction::record_error((int)$transaction->id, $e->getMessage());
+            if ($transaction !== null) {
+                transaction::record_error((int)$transaction->id, $e->getMessage());
+            }
             return processing_result::retry($e->getMessage(), $e->is_retryable());
         }
 
+        if ($transaction === null) {
+            $reference = (string)($payment->external_reference ?? '');
+            $transaction = $reference !== '' ? transaction::get_by_reference($reference) : null;
+            if ($transaction === null || (int)$transaction->enrolid !== (int)$instance->id) {
+                return processing_result::ignored('Payment reference does not identify a transaction in this instance.');
+            }
+        }
+
+        // apply_payment performs the final exact reference and financial checks
+        // under the transaction lock, including re-deliveries of the same payment.
         return $this->apply_payment($instance, $transaction, $payment);
     }
 
@@ -125,9 +141,11 @@ class payment_processor
      *
      * @param  string|int     $merchantorderid
      * @param  \stdClass|null $hinttransaction
+     * @param  \stdClass|null $instancehint verified instance for unbound notifications
      * @return processing_result
      */
-    public function process_merchant_order($merchantorderid, ?\stdClass $hinttransaction = null): processing_result {
+    public function process_merchant_order($merchantorderid, ?\stdClass $hinttransaction = null,
+            ?\stdClass $instancehint = null): processing_result {
         global $DB;
 
         $merchantorderid = (string)$merchantorderid;
@@ -140,11 +158,16 @@ class payment_processor
             $records = $DB->get_records(transaction::TABLE, ['merchantorderid' => $merchantorderid], 'id DESC', '*', 0, 1);
             $transaction = $records ? reset($records) : null;
         }
-        if ($transaction === null) {
-            return processing_result::ignored('No local transaction matches this merchant order.');
+        if ($transaction === null && $instancehint === null) {
+            return processing_result::ignored('No instance to resolve this merchant order.');
+        }
+        if ($transaction !== null && $instancehint !== null &&
+                (int)$transaction->enrolid !== (int)$instancehint->id) {
+            return processing_result::ignored('Merchant order belongs to a different enrolment instance.');
         }
 
-        $instance = $DB->get_record('enrol', ['id' => $transaction->enrolid, 'enrol' => 'mercadopagocpro']);
+        $enrolid = $transaction !== null ? (int)$transaction->enrolid : (int)$instancehint->id;
+        $instance = $DB->get_record('enrol', ['id' => $enrolid, 'enrol' => 'mercadopagocpro']);
         if (!$instance) {
             return processing_result::ignored('The enrolment instance no longer exists.');
         }
@@ -167,7 +190,7 @@ class payment_processor
             if ($id === null) {
                 continue;
             }
-            $last = $this->process_payment((string)$id, $transaction);
+            $last = $this->process_payment((string)$id, $transaction, $instance);
             if ($last->is_handled()) {
                 // Once one payment of the order settles the enrolment, stop.
                 break;
